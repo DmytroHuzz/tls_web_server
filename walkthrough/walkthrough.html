@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Adding self-written TLS to a self-written web server</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --good: #34d399;
+      --warn: #fbbf24;
+      --code: #020617;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top left, #1e293b, var(--bg));
+      color: var(--text);
+      line-height: 1.7;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 48px 20px 90px; }
+    h1 { font-size: clamp(2rem, 5vw, 4rem); line-height: 1.05; margin: 14px 0 16px; }
+    h2 { margin-top: 64px; color: white; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+    h3 { margin-top: 34px; color: #dbeafe; }
+    h4 { margin-top: 24px; color: #bfdbfe; }
+    p, li { color: var(--text); }
+    .muted { color: var(--muted); }
+    .hero { padding: 34px; border: 1px solid var(--border); border-radius: 24px; background: rgba(15, 23, 42, 0.84); box-shadow: 0 24px 80px rgba(0,0,0,.35); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .card { background: rgba(17, 24, 39, .88); border: 1px solid var(--border); border-radius: 18px; padding: 20px; }
+    .callout { border-left: 4px solid var(--accent); background: rgba(56,189,248,.08); padding: 16px 18px; border-radius: 12px; margin: 18px 0; }
+    .warning { border-left-color: var(--warn); background: rgba(251,191,36,.08); }
+    .success { border-left-color: var(--good); background: rgba(52,211,153,.08); }
+    .diagram, pre { background: var(--code); border: 1px solid var(--border); border-radius: 16px; padding: 18px; overflow-x: auto; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    code { color: #bae6fd; }
+    a { color: var(--accent); }
+    table { width: 100%; border-collapse: collapse; margin: 18px 0; overflow: hidden; border-radius: 14px; }
+    th, td { border: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: rgba(15,23,42,.95); color: #dbeafe; }
+    td { background: rgba(17,24,39,.65); }
+    .pill { display: inline-block; padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; color: #bfdbfe; background: #0b1220; font-size: .9rem; margin-right: 8px; margin-bottom: 8px; }
+    .small { font-size: .95rem; }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <p>
+      <span class="pill">web server</span>
+      <span class="pill">TLS</span>
+      <span class="pill">client/server workflow</span>
+      <span class="pill">X25519</span>
+      <span class="pill">HKDF</span>
+      <span class="pill">AES-GCM</span>
+    </p>
+    <h1>Adding self-written TLS to a self-written web server</h1>
+    <p class="muted">This walkthrough is written for a beginner reader. It explains the exact client/server communication flow before showing how the code joins the TLS layer with the HTTP web server.</p>
+    <p>
+      Original web-server series: <a href="https://dev.to/dmytro_huz/building-your-own-web-server-part-1-theory-and-foundations-3kgo">Building Your Own Web Server</a>
+      · source: <a href="https://github.com/DmytroHuzz/build_own_webserver">DmytroHuzz/build_own_webserver</a><br />
+      Original TLS series: <a href="https://www.dmytrohuz.com/p/rebuilding-tls-from-scratch-my-complete">Rebuilding TLS from Scratch</a>
+      · source: <a href="https://github.com/DmytroHuzz/rebuilding_tls">DmytroHuzz/rebuilding_tls</a>
+    </p>
+  </section>
+
+  <h2>Run the project first</h2>
+  <p>If you like to see the result before reading the explanation, run the one-command demo from the project root:</p>
+  <pre><code>python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e ".[dev]"
+python3 scripts/demo.py</code></pre>
+  <p>The plain HTTP path and the HTTP-over-self-written-TLS path should both print <code>HTTP/1.1 200 OK</code>.</p>
+  <div class="callout warning">
+    <strong>Important:</strong> this is not browser-compatible HTTPS. The TLS-like wire format is intentionally small for learning, so use <code>python3 client_side.py</code> or <code>python3 scripts/demo.py</code>, not a browser.
+  </div>
+
+  <h2>Minimum concepts before reading</h2>
+  <p>You do not need to read the previous series first, but these concepts make the walkthrough much easier.</p>
+  <table>
+    <tr><th>Term</th><th>Beginner meaning</th></tr>
+    <tr><td>TCP</td><td>A reliable stream of bytes. It does not preserve message boundaries.</td></tr>
+    <tr><td>HTTP parser</td><td>Code that turns plaintext HTTP bytes into a request object.</td></tr>
+    <tr><td>TLS record</td><td>A framed chunk of bytes. After the handshake, application records are encrypted.</td></tr>
+    <tr><td>Handshake</td><td>The setup phase where peers agree on keys and the client verifies the server.</td></tr>
+    <tr><td>Certificate chain</td><td>A server certificate plus issuer certificates that lead to a trusted root.</td></tr>
+    <tr><td>Ephemeral key</td><td>A temporary key used for one connection, then thrown away.</td></tr>
+    <tr><td>HKDF</td><td>A function that turns a shared secret into encryption keys.</td></tr>
+    <tr><td>AES-GCM</td><td>Encryption that also detects tampering.</td></tr>
+  </table>
+
+  <h2>Wrong mental model vs right mental model</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Wrong mental model</h3>
+      <p>The HTTP parser receives encrypted bytes and somehow understands TLS.</p>
+      <pre class="diagram">TCP bytes ──► HTTP parser
+              tries to handle TLS too</pre>
+    </div>
+    <div class="card">
+      <h3>Right mental model</h3>
+      <p>The TLS layer decrypts records first. The HTTP parser receives only plaintext HTTP bytes.</p>
+      <pre class="diagram">TCP bytes ──► TLS layer ──► HTTP parser
+           encrypted       plaintext</pre>
+    </div>
+  </div>
+
+  <h2>NGINX / OpenSSL analogy</h2>
+  <p>Production NGINX normally relies on a TLS library such as OpenSSL. OpenSSL handles the secure connection state; NGINX then processes plaintext HTTP. This project uses the same boundary with smaller educational pieces.</p>
+  <pre class="diagram">Production-ish:
+TCP → OpenSSL/TLS state → plaintext HTTP → NGINX HTTP processing
+
+This project:
+TCP → ToyTLSServerConnection → plaintext HTTP → HTTPParser / route matcher</pre>
+
+  <h2>1. The one idea to keep in mind</h2>
+  <p>A web server normally receives bytes from a TCP socket and gives those bytes to an HTTP parser.</p>
+  <p>After TLS is added, the bytes from the TCP socket are no longer HTTP. They are TLS records. The server must first decrypt those records. Only then can the HTTP parser run.</p>
+  <div class="callout success">
+    <strong>Mental model:</strong> TCP carries bytes. TLS turns encrypted bytes into plaintext bytes. HTTP parses the plaintext bytes.
+  </div>
+  <pre class="diagram">Plain HTTP:
+client HTTP bytes ──TCP──► server HTTP parser
+
+HTTP over self-written TLS:
+client HTTP bytes
+  ↓ encrypted by client TLS layer
+TLS record bytes ──TCP──► server TLS layer
+  ↓ decrypted by server TLS layer
+plaintext HTTP bytes ───► server HTTP parser</pre>
+
+  <h2>2. First recap: what the web server already did</h2>
+  <p>The final web-server project had no TLS. It was a non-blocking HTTP file server.</p>
+  <h3>Plain HTTP communication</h3>
+  <pre class="diagram">Client                                      Server
+  │                                           │
+  │ TCP connect                              │ accept connection
+  │                                           │
+  ├── GET / HTTP/1.1 ───────────────────────►│ read bytes from socket
+  │   Host: localhost                        │ append bytes to DataProvider
+  │                                           │ parse HTTP request
+  │                                           │ choose matching location /
+  │                                           │ read html/index.html
+  │                                           │ build HTTP response
+  │                                           │
+  │◄──────────────────── HTTP/1.1 200 OK ────┤ write response bytes
+  │                         body...</pre>
+  <p>The important part is the buffer:</p>
+  <pre><code>socket.recv(...) → DataProvider → HTTPParser.parse_message(...)</code></pre>
+  <p>TCP is a stream. One read can contain half a request, exactly one request, or multiple requests. That is why the parser returns both the parsed message and the number of bytes it consumed.</p>
+
+  <h2>3. Second recap: what the TLS project already did</h2>
+  <p>The final TLS project created an authenticated encrypted channel between a client and a server. The workflow has three phases.</p>
+
+  <h3>Phase 0 — before the connection</h3>
+  <p>Before any TCP connection exists, both sides already have some long-term information.</p>
+  <table>
+    <tr><th>Side</th><th>Already has</th><th>Why it matters</th></tr>
+    <tr>
+      <td>Server</td>
+      <td><code>server_key.pem</code>, <code>server_cert.pem</code>, <code>intermediate_cert.pem</code></td>
+      <td>The private key stays on the server. The certificate chain lets the server prove its identity.</td>
+    </tr>
+    <tr>
+      <td>Client</td>
+      <td><code>root_cert.pem</code></td>
+      <td>The client trusts this root certificate and uses it to verify the server certificate chain.</td>
+    </tr>
+    <tr>
+      <td>Both</td>
+      <td>The protocol rules: X25519, HKDF, AES-GCM, message tags</td>
+      <td>Both sides must interpret the same bytes in the same way.</td>
+    </tr>
+  </table>
+  <div class="callout">
+    At this point there are no session keys yet. The client and server have not talked. They only have long-term identity/trust material and agreed protocol rules.
+  </div>
+
+  <h3>Phase 1 — handshake</h3>
+  <p>The handshake is where the client and server agree on fresh session keys and the client verifies that it is talking to the real server.</p>
+
+  <h4>Step 1: TCP connection</h4>
+  <pre class="diagram">Client                                      Server
+  │                                           │
+  │ TCP connect                              │ accept TCP connection
+  │                                           │</pre>
+  <p>Nothing is encrypted yet. TCP only gives both sides a byte stream.</p>
+
+  <h4>Step 2: ClientHello</h4>
+  <p>The client creates a fresh ephemeral X25519 key pair. It keeps the private key in memory and sends only the public key.</p>
+  <pre class="diagram">Client                                      Server
+  │                                           │
+  │ generate client_ephemeral_private         │
+  │ derive client_ephemeral_public            │
+  │                                           │
+  ├── ClientHello { client_eph_pub } ───────► │ receives client's public key</pre>
+  <table>
+    <tr><th>Question</th><th>Answer</th></tr>
+    <tr><td>What is on the wire?</td><td>The client's ephemeral public key.</td></tr>
+    <tr><td>What stays private?</td><td>The client's ephemeral private key.</td></tr>
+    <tr><td>Can an observer compute the session key now?</td><td>No. The observer has only a public key.</td></tr>
+  </table>
+
+  <h4>Step 3: ServerHello and ServerAuth</h4>
+  <p>The server receives the client's public key. Then it creates its own fresh ephemeral X25519 key pair.</p>
+  <p>The server sends two messages back:</p>
+  <ol>
+    <li><strong>ServerHello</strong> — contains the server's ephemeral public key.</li>
+    <li><strong>ServerAuth</strong> — contains the server certificate chain and a signature.</li>
+  </ol>
+  <pre class="diagram">Client                                      Server
+  │                                           │ receives client_eph_pub
+  │                                           │ generate server_ephemeral_private
+  │                                           │ derive server_ephemeral_public
+  │                                           │
+  │ ◄──────── ServerHello { server_eph_pub } ─┤
+  │ ◄──────── ServerAuth {                    │
+  │              server certificate,          │
+  │              intermediate certificate,    │
+  │              signature                    │
+  │          } ───────────────────────────────┤</pre>
+  <p>The signature is the bridge between identity and this connection:</p>
+  <pre><code>signature = sign_with_server_identity_private_key(
+    client_ephemeral_public || server_ephemeral_public
+)</code></pre>
+  <p>This says: “The server that owns the certificate private key also saw these exact ephemeral keys.”</p>
+
+  <h4>Step 4: The server computes its session keys</h4>
+  <p>The server can already compute the shared secret:</p>
+  <pre><code>shared_secret = X25519(
+    server_ephemeral_private,
+    client_ephemeral_public
+)</code></pre>
+  <p>Then HKDF derives two directional keys:</p>
+  <ul>
+    <li><code>client_write_key</code> — records sent by the client, decrypted by the server.</li>
+    <li><code>server_write_key</code> — records sent by the server, decrypted by the client.</li>
+  </ul>
+
+  <h4>Step 5: The client verifies the server</h4>
+  <p>The client does not trust the server just because it sent a certificate. It checks two things.</p>
+  <table>
+    <tr><th>Check</th><th>What the client verifies</th><th>Why</th></tr>
+    <tr>
+      <td>Certificate chain</td>
+      <td><code>server_cert → intermediate_cert → trusted root_cert</code></td>
+      <td>Proves that the public key in the server certificate belongs to a trusted identity.</td>
+    </tr>
+    <tr>
+      <td>CertificateVerify signature</td>
+      <td>The signature over <code>client_eph_pub || server_eph_pub</code></td>
+      <td>Proves that this TCP peer owns the private key matching the certificate.</td>
+    </tr>
+  </table>
+
+  <h4>Step 6: The client computes the same session keys</h4>
+  <p>If verification succeeds, the client computes the same shared secret:</p>
+  <pre><code>shared_secret = X25519(
+    client_ephemeral_private,
+    server_ephemeral_public
+)</code></pre>
+  <p>Because of Diffie-Hellman, this produces the same bytes that the server computed.</p>
+
+  <h3>What each side can compute</h3>
+  <table>
+    <tr><th>Participant</th><th>Has</th><th>Can compute shared secret?</th></tr>
+    <tr>
+      <td>Client</td>
+      <td><code>client_private</code> + <code>server_public</code></td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>Server</td>
+      <td><code>server_private</code> + <code>client_public</code></td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>Network observer</td>
+      <td><code>client_public</code> + <code>server_public</code> + certificates</td>
+      <td>No</td>
+    </tr>
+  </table>
+
+  <h3>Client side state after the handshake</h3>
+  <ul>
+    <li>server certificate chain was verified,</li>
+    <li>CertificateVerify signature was verified,</li>
+    <li><code>client_write_key</code> is ready for encrypting client-to-server records,</li>
+    <li><code>server_write_key</code> is ready for decrypting server-to-client records,</li>
+    <li>send and receive sequence numbers start at 0.</li>
+  </ul>
+
+  <h3>Server side state after the handshake</h3>
+  <ul>
+    <li>client ephemeral public key was received,</li>
+    <li>server ephemeral key was generated for this connection,</li>
+    <li>ServerHello and ServerAuth were sent,</li>
+    <li><code>client_write_key</code> is ready for decrypting client-to-server records,</li>
+    <li><code>server_write_key</code> is ready for encrypting server-to-client records,</li>
+    <li>send and receive sequence numbers start at 0.</li>
+  </ul>
+
+  <h3>Now HTTP can start</h3>
+  <p>After the handshake, the TLS layer is ready. But HTTP has not happened yet. The next bytes sent by the client will be an HTTP request, encrypted inside an application record.</p>
+
+  <h3>Phase 2 — encrypted HTTP</h3>
+  <p>Now the client builds an ordinary HTTP request:</p>
+  <pre><code>GET / HTTP/1.1\r\n
+Host: localhost\r\n
+Connection: close\r\n
+\r\n</code></pre>
+  <p>But it does not send those bytes directly over TCP. It encrypts them first.</p>
+  <pre class="diagram">Client                                      Server
+  │                                           │
+  │ plaintext HTTP request                    │
+  │ encrypt with client_write_key, seq=0      │
+  │                                           │
+  ├── AES-GCM record { encrypted HTTP } ────► │ decrypt with client_write_key, seq=0
+  │                                           │ recover plaintext HTTP request
+  │                                           │ append to HTTP input buffer
+  │                                           │ HTTPParser.parse_message(...)</pre>
+  <p>The server then builds a normal plaintext HTTP response and encrypts it with the server-to-client key.</p>
+  <pre class="diagram">Client                                      Server
+  │                                           │ HTTP/1.1 200 OK + body
+  │                                           │ encrypt with server_write_key, seq=0
+  │                                           │
+  │ ◄──── AES-GCM record { encrypted HTTP } ──┤
+  │ decrypt with server_write_key, seq=0       │
+  │ recover plaintext HTTP response           │</pre>
+
+  <h2>4. What changes when TLS is inserted into the web server?</h2>
+  <p>The HTTP parser does not change. The route matcher does not change. File serving does not change.</p>
+  <p>What changes is the connection layer. Each accepted connection gets a context object:</p>
+  <pre><code>class ConnectionContext:
+    def __init__(self, sock, server_block, tls=None):
+        self.sock = sock
+        self.server_block = server_block
+        self.tls = tls
+        self.http_input = DataProvider()
+        self.output_buffer = bytearray()
+        self.closing_after_write = False</code></pre>
+  <p>The meaning of <code>tls</code> is simple:</p>
+  <table>
+    <tr><th>Value</th><th>Meaning</th></tr>
+    <tr><td><code>tls is None</code></td><td>This is a plain HTTP connection. Socket bytes are HTTP bytes.</td></tr>
+    <tr><td><code>tls is ToyTLSServerConnection(...)</code></td><td>This is a TLS connection. Socket bytes must be processed by the TLS layer first.</td></tr>
+  </table>
+
+  <h2>5. The read path in the integrated server</h2>
+  <h3>Plain HTTP listener</h3>
+  <pre><code>data = sock.recv(4096)
+context.http_input.append(data)
+_handle_http_messages(context)</code></pre>
+  <p>This is the same path as the original web server.</p>
+
+  <h3>TLS listener</h3>
+  <pre><code>data = sock.recv(4096)
+context.tls.feed_wire_data(data)
+_queue_output(context, context.tls.pop_pending_wire_data())
+plaintext = context.tls.read_plaintext()
+
+if plaintext:
+    context.http_input.append(plaintext)
+    _handle_http_messages(context)</code></pre>
+  <p>The important difference is that <code>data</code> is not directly given to the HTTP parser. Only <code>plaintext</code> is.</p>
+
+  <h2>6. Why the TLS demo had to become a state machine</h2>
+  <p>The standalone TLS series could be written as a straight-line program:</p>
+  <pre class="diagram">recv ClientHello
+send ServerHello
+send ServerAuth
+recv encrypted request
+send encrypted response</pre>
+  <p>That is easy to read, but it blocks. A non-blocking web server cannot stop the whole event loop while one client is halfway through a handshake.</p>
+  <p>So the integrated TLS server keeps state:</p>
+  <pre class="diagram">WAIT_CLIENT_HELLO
+  feed TCP chunks into RecordBuffer
+  if a complete ClientHello exists:
+      process it
+      queue ServerHello
+      queue ServerAuth
+      derive keys
+      move to ESTABLISHED
+
+ESTABLISHED
+  each incoming record is application data
+  decrypt into plaintext HTTP bytes
+  each outgoing HTTP response is encrypted into a record</pre>
+  <p>This is why the TLS connection object has this API:</p>
+  <pre><code>tls.feed_wire_data(data_from_socket)
+bytes_to_send = tls.pop_pending_wire_data()
+http_bytes = tls.read_plaintext()
+record_bytes = tls.protect_application_data(http_response)</code></pre>
+
+  <h2>7. The full integrated message flow</h2>
+  <pre class="diagram">Client                                      Server
+  │                                           │
+  │ TCP connect to TLS port                   │ accept socket
+  │                                           │ create ConnectionContext(tls=ToyTLSServerConnection)
+  │                                           │
+  │ generate client ephemeral keypair         │
+  ├── ClientHello { client_eph_pub } ───────► │ feed_wire_data(...)
+  │                                           │ parse ClientHello
+  │                                           │ generate server ephemeral keypair
+  │                                           │ sign client_eph_pub || server_eph_pub
+  │                                           │ derive session keys
+  │                                           │ queue handshake responses
+  │                                           │
+  │ ◄──────── ServerHello { server_eph_pub } ─┤ pop_pending_wire_data()
+  │ ◄──────── ServerAuth { certs, sig } ──────┤
+  │                                           │
+  │ verify certificate chain                  │
+  │ verify signature                          │
+  │ derive same session keys                  │
+  │                                           │
+  │ build plaintext HTTP request              │
+  │ encrypt with client_write_key             │
+  ├── encrypted application record ─────────► │ decrypt with client_write_key
+  │                                           │ read_plaintext() gives HTTP bytes
+  │                                           │ HTTPParser.parse_message(...)
+  │                                           │ read html/index.html
+  │                                           │ build plaintext HTTP response
+  │                                           │ encrypt with server_write_key
+  │ ◄──────── encrypted application record ───┤
+  │ decrypt with server_write_key             │
+  │ print HTTP response                       │</pre>
+
+  <h2>8. The configuration that chooses plain vs TLS</h2>
+  <pre><code>http {
+    server {
+        listen 8080;
+        listen 8443 ssl;
+        server_name localhost;
+
+        ssl_certificate certs/server_cert.pem;
+        ssl_certificate_key certs/server_key.pem;
+        ssl_certificate_chain certs/intermediate_cert.pem;
+
+        location / {
+            root html;
+        }
+    }
+}</code></pre>
+  <p><code>listen 8080;</code> creates a plain listener. <code>listen 8443 ssl;</code> creates a listener that attaches TLS state to accepted connections.</p>
+
+  <h2>9. What is on the wire?</h2>
+  <p>This project uses a simplified educational wire format from the TLS series. It is not real TLS 1.3.</p>
+  <table>
+    <tr><th>Moment</th><th>Wire bytes contain</th><th>Encrypted?</th></tr>
+    <tr><td>ClientHello</td><td>Client ephemeral public key</td><td>No</td></tr>
+    <tr><td>ServerHello</td><td>Server ephemeral public key</td><td>No</td></tr>
+    <tr><td>ServerAuth</td><td>Certificate chain + signature</td><td>No</td></tr>
+    <tr><td>Client request</td><td>AES-GCM protected HTTP request</td><td>Yes</td></tr>
+    <tr><td>Server response</td><td>AES-GCM protected HTTP response</td><td>Yes</td></tr>
+  </table>
+
+  <h2>10. Files to read in order</h2>
+  <ol>
+    <li><code>server_side.py</code> — prepares the demo site and starts the server.</li>
+    <li><code>client_side.py</code> — shows plain HTTP and self-written TLS client workflows.</li>
+    <li><code>tls_web_server/tls/connection.py</code> — the explicit client/server TLS state machines.</li>
+    <li><code>tls_web_server/server.py</code> — the event loop where plain and TLS connections split.</li>
+    <li><code>tls_web_server/http.py</code> — HTTP parser and file response code reused by both paths.</li>
+    <li><code>tls_web_server/config.py</code> — config parser for <code>listen 8443 ssl</code>.</li>
+  </ol>
+
+  <h2>11. How to run it</h2>
+  <h3>Two-terminal workflow</h3>
+  <pre><code># Terminal 1
+python3 server_side.py
+
+# Terminal 2
+python3 client_side.py</code></pre>
+  <h3>One-command workflow</h3>
+  <pre><code>python3 scripts/demo.py</code></pre>
+  <h3>Tests</h3>
+  <pre><code>python3 -m pytest -q</code></pre>
+
+  <h2>12. What this project proves</h2>
+  <ul>
+    <li>TLS belongs below HTTP, not inside the HTTP parser.</li>
+    <li>The same HTTP parser can serve plain and encrypted connections.</li>
+    <li>A blocking TLS demo can be refactored into a buffer-oriented state machine.</li>
+    <li>After the handshake, encrypted application records become normal HTTP bytes.</li>
+    <li>The server can choose plain or TLS behavior from an NGINX-style config.</li>
+  </ul>
+
+  <h2>13. What this project does not prove</h2>
+  <div class="callout warning">
+    This is not browser-compatible HTTPS. It is a learning protocol with TLS-like concepts.
+  </div>
+  <p>To work with a browser, the project would need real TLS 1.3 records, real ClientHello parsing, real ServerHello, transcript hashes, encrypted handshake messages, Finished messages, SNI, ALPN, alerts, and a browser-trusted certificate.</p>
+
+  <h2>14. Final mental model</h2>
+  <pre class="diagram">Before TLS:
+TCP bytes are HTTP bytes.
+
+After TLS:
+TCP bytes are TLS records.
+TLS records decrypt into HTTP bytes.
+HTTP parser sees only HTTP bytes.
+
+That is the whole integration boundary.</pre>
+</main>
+</body>
+</html>
