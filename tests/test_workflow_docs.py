@@ -7,6 +7,7 @@ def test_reader_facing_docs_do_not_mention_local_agent_environment():
     docs = [
         ROOT / "README.md",
         ROOT / "walkthrough" / "walkthrough.html",
+        ROOT / "docs" / "index.html",
         ROOT / "scripts" / "demo.py",
     ]
     for path in docs:
@@ -60,6 +61,22 @@ def test_readme_contains_setup_glossary_expected_output_and_troubleshooting():
     ]
     for command in required_commands:
         assert command in readme
+
+
+def test_readme_links_to_published_github_pages_walkthrough():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "## Visual walkthrough" in readme
+    assert "https://dmytrohuzz.github.io/tls_web_server/" in readme
+    assert "docs/index.html" in readme
+
+
+def test_github_pages_entrypoint_matches_walkthrough():
+    walkthrough = (ROOT / "walkthrough" / "walkthrough.html").read_text(encoding="utf-8")
+    pages_index = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
+
+    assert pages_index == walkthrough
+    assert (ROOT / "docs" / ".nojekyll").exists()
 
 
 def test_standalone_client_and_server_workflow_files_exist():

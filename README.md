@@ -31,6 +31,19 @@ The HTTP parser does not know whether the request came from a plain socket or fr
 
 > This is an educational TLS-like protocol, not browser-compatible HTTPS. Browsers and `curl https://...` expect the real TLS 1.3 wire format. This project keeps the wire format small so the integration boundary is easy to see.
 
+## Visual walkthrough
+
+Read the published walkthrough here:
+
+**[Adding self-written TLS to a self-written web server](https://dmytrohuzz.github.io/tls_web_server/)**
+
+The same page is also available in the repository for local reading:
+
+```text
+docs/index.html
+walkthrough/walkthrough.html
+```
+
 ---
 
 ## Setup from a fresh clone
