@@ -1,9 +1,11 @@
 # Adding self-written TLS to a self-written web server
 
+This project is part of **Software Foundations**, the first-principles systems work behind [Software in the Grid](https://www.softwareinthegrid.com/).
+
 This repository is the bridge between two learning projects:
 
 - **Building Your Own Web Server** — article series: [Part 1 on DEV](https://dev.to/dmytro_huz/building-your-own-web-server-part-1-theory-and-foundations-3kgo), source code: [DmytroHuzz/build_own_webserver](https://github.com/DmytroHuzz/build_own_webserver)
-- **Rebuilding TLS from Scratch** — complete series: [dmytrohuz.com](https://www.dmytrohuz.com/p/rebuilding-tls-from-scratch-my-complete), source code: [DmytroHuzz/rebuilding_tls](https://github.com/DmytroHuzz/rebuilding_tls)
+- **Rebuilding TLS from Scratch** — complete series: [Software in the Grid](https://www.softwareinthegrid.com/p/rebuilding-tls-from-scratch-my-complete), source code: [DmytroHuzz/rebuilding_tls](https://github.com/DmytroHuzz/rebuilding_tls)
 
 The web-server series rebuilt the server side of HTTP: sockets, config parsing, route matching, file serving, and finally a single-threaded non-blocking server.
 
